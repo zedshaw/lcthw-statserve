@@ -2,13 +2,13 @@
 #include <ctype.h>
 #include <lcthw/dbg.h>
 #include <lcthw/hashmap.h>
-#include <lcthw/stats.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include "net.h"
 #include <netdb.h>
+#include "statserve.h"
 
 struct tagbstring LINE_SPLIT = bsStatic(" ");
 struct tagbstring CREATE = bsStatic("create");
@@ -21,28 +21,12 @@ struct tagbstring OK = bsStatic("OK\n");
 struct tagbstring ERR = bsStatic("ERR\n");
 struct tagbstring DNE = bsStatic("DNE\n");
 struct tagbstring EXISTS = bsStatic("EXISTS\n");
+struct tagbstring SLASH = bsStatic("/");
 const char LINE_ENDING = '\n';
 
 const int RB_SIZE = 1024 * 10;
 
 Hashmap *DATA = NULL;
-
-struct Command;
-
-typedef int (*handler_cb)(struct Command *cmd, RingBuffer *send_rb);
-
-typedef struct Command {
-    bstring command;
-    bstring name;
-    bstring number;
-    handler_cb handler;
-} Command;
-
-
-typedef struct Record {
-    bstring name;
-    Stats *stat;
-} Record;
 
 void handle_sigchild(int sig) {
     sig = 0; // ignore it
@@ -50,21 +34,24 @@ void handle_sigchild(int sig) {
     }
 }
 
-void send_reply(RingBuffer *send_rb, bstring reply)
-{
-    RingBuffer_puts(send_rb, reply);
-}
 
-int handle_create(Command *cmd, RingBuffer *send_rb)
+int handle_create(Command *cmd, RingBuffer *send_rb, bstring path)
 {
     int rc = 0;
+    int is_root = biseq(path, cmd->name);
+    log_info("create: %s %s %s", bdata(cmd->name), bdata(path), bdata(cmd->number));
 
-    // if the name is in the DATA map then return exists
-    if(Hashmap_get(DATA, cmd->name)) {
+    Record *info = Hashmap_get(DATA, path);
+
+    if(info != NULL && is_root) {
+        // report if root exists, just skip children
         send_reply(send_rb, &EXISTS);
+    } else if(info != NULL) {
+        debug("Child %s exists, skipping it.", bdata(path));
+        return 0;
     } else {
-        // allocate a recrod
-        debug("create: %s %s", bdata(cmd->name), bdata(cmd->number));
+        // new child so make it
+        debug("create: %s %s", bdata(path), bdata(cmd->number));
 
         Record *info = calloc(sizeof(Record), 1);
         check_mem(info);
@@ -74,7 +61,7 @@ int handle_create(Command *cmd, RingBuffer *send_rb)
         check_mem(info->stat);
 
         // set its name element
-        info->name = bstrcpy(cmd->name);
+        info->name = bstrcpy(path);
         check_mem(info->name);
 
         // do a first sample
@@ -84,8 +71,10 @@ int handle_create(Command *cmd, RingBuffer *send_rb)
         rc = Hashmap_set(DATA, info->name, info);
         check(rc == 0, "Failed to add data to map.");
 
-        // send an OK
-        send_reply(send_rb, &OK);
+        // only send the for the root part
+        if(is_root) {
+            send_reply(send_rb, &OK);
+        }
     }
 
     return 0;
@@ -94,35 +83,66 @@ error:
 }
 
 
-int handle_sample(Command *cmd, RingBuffer *send_rb)
+int handle_sample(Command *cmd, RingBuffer *send_rb, bstring path)
 {
     // get the info from the hashmap
-    Record *info = Hashmap_get(DATA, cmd->name);
+    Record *info = Hashmap_get(DATA, path);
+    int is_root = biseq(path, cmd->name);
+    log_info("sample %s %s %s", bdata(cmd->name), bdata(path), bdata(cmd->number));
+    bstring child_path = NULL;
 
     if(info == NULL) {
         // if it doesn't exist then DNE
         send_reply(send_rb, &DNE);
+        return 0;
     } else {
-        // else run sample on it, return the mean
-        Stats_sample(info->stat, atof(bdata(cmd->number)));
-        bstring reply = bformat("%f\n", Stats_mean(info->stat));
-        send_reply(send_rb, reply);
-        bdestroy(reply);
+        if(is_root) {
+            // just sample the root like normal
+            Stats_sample(info->stat, atof(bdata(cmd->number)));
+        } else {
+            // need to do some hackery to get the child path
+            // for rolling up mean-of-means on it
+
+            // increase the qty on path up one
+            cmd->path->qty++;
+            // get the "child path" (previous path?)
+            child_path = bjoin(cmd->path, &SLASH);
+            // get that info from the DATA
+            Record *child_info = Hashmap_get(DATA, child_path);
+            bdestroy(child_path);
+
+            // if it exists then sample on it
+            if(child_info) {
+                // info is /logins, child_info is /logins/zed 
+                // we want /logins/zed's mean to be a new sample on /logins
+                Stats_sample(info->stat, Stats_mean(child_info->stat));
+            }
+            // drop the path back to where it was
+            cmd->path->qty--;
+        }
+
     }
 
+    // do the reply for the mean last
+    bstring reply = bformat("%f\n", Stats_mean(info->stat));
+    send_reply(send_rb, reply);
+    bdestroy(reply);
 
     return 0;
 }
 
-int handle_delete(Command *cmd, RingBuffer *send_rb)
+int handle_delete(Command *cmd, RingBuffer *send_rb, bstring path)
 {
-    log_info("delete: %s", bdata(cmd->name));
-    Record *info = Hashmap_get(DATA, cmd->name);
+    log_info("delete: %s %s", bdata(cmd->name), bdata(path));
+    Record *info = Hashmap_get(DATA, path);
+    int is_root = biseq(path, cmd->name);
 
+    // BUG: should just decide that this isn't scanned 
+    // but run once, for now just only run on root
     if(info == NULL) {
         send_reply(send_rb, &DNE);
-    } else {
-        Hashmap_delete(DATA, cmd->name);
+    } else if(is_root) {
+        Hashmap_delete(DATA, path);
 
         free(info->stat);
         bdestroy(info->name);
@@ -134,10 +154,10 @@ int handle_delete(Command *cmd, RingBuffer *send_rb)
     return 0;
 }
 
-int handle_mean(Command *cmd, RingBuffer *send_rb)
+int handle_mean(Command *cmd, RingBuffer *send_rb, bstring path)
 {
-    log_info("mean: %s", bdata(cmd->name));
-    Record *info = Hashmap_get(DATA, cmd->name);
+    log_info("mean: %s %s %s", bdata(cmd->name), bdata(path), bdata(path));
+    Record *info = Hashmap_get(DATA, path);
 
     if(info == NULL) {
         send_reply(send_rb, &DNE);
@@ -150,10 +170,10 @@ int handle_mean(Command *cmd, RingBuffer *send_rb)
     return 0;
 }
 
-int handle_stddev(Command *cmd, RingBuffer *send_rb)
+int handle_stddev(Command *cmd, RingBuffer *send_rb, bstring path)
 {
-    log_info("stddev: %s", bdata(cmd->name));
-    Record *info = Hashmap_get(DATA, cmd->name);
+    log_info("stddev: %s %s %s", bdata(cmd->name), bdata(path), bdata(path));
+    Record *info = Hashmap_get(DATA, path);
 
     if(info == NULL) {
         send_reply(send_rb, &DNE);
@@ -166,10 +186,10 @@ int handle_stddev(Command *cmd, RingBuffer *send_rb)
     return 0;
 }
 
-int handle_dump(Command *cmd, RingBuffer *send_rb)
+int handle_dump(Command *cmd, RingBuffer *send_rb, bstring path)
 {
-    log_info("dump: %s", bdata(cmd->name));
-    Record *info = Hashmap_get(DATA, cmd->name);
+    log_info("dump: %s, %s, %s", bdata(cmd->name), bdata(path), bdata(path));
+    Record *info = Hashmap_get(DATA, path);
 
     if(info == NULL) {
         send_reply(send_rb, &DNE);
@@ -230,6 +250,39 @@ error:
     return -1;
 }
 
+int scan_paths(Command *cmd, RingBuffer *send_rb)
+{
+    check(cmd->path != NULL, "Path was not set in command.");
+
+    int rc = 0;
+    // save the original path length
+    size_t qty = cmd->path->qty;
+
+    // starting at the longest path, shorten it and call
+    // for each one:
+    for(; cmd->path->qty > 1; cmd->path->qty--) {
+        // remake the path with / again
+        bstring path = bjoin(cmd->path, &SLASH);
+        // call the handler with the path
+        rc = cmd->handler(cmd, send_rb, path);
+        // if the handler returns != 0 then abort and return that
+        bdestroy(path);
+
+        if(rc != 0) break;
+    }
+
+    // restore path length
+    cmd->path->qty = qty;
+    return rc;
+error:
+    return -1;
+}
+
+struct bstrList *parse_name(bstring name)
+{
+    return bsplits(name, &SLASH);
+}
+
 int parse_line(bstring data, RingBuffer *send_rb)
 {
     int rc = -1;
@@ -243,13 +296,23 @@ int parse_line(bstring data, RingBuffer *send_rb)
     rc = parse_command(splits, &cmd);
     check(rc == 0, "Failed to parse command.");
 
-    // call the command handler for that command
-    rc = cmd.handler(&cmd, send_rb);
+    // parse the name into the path we need for scan_paths
+    cmd.path = parse_name(cmd.name);
+    check(cmd.path != NULL, "Invalid path.");
+
+    // scan the path and call the handlers
+    rc = scan_paths(&cmd, send_rb);
+    check(rc == 0, "Failure running command against path: %s", bdata(cmd.name));
+
+    bstrListDestroy(cmd.path);
+    bstrListDestroy(splits);
+
+    return 0;
 
 error: // fallthrough
+    if(cmd.path) bstrListDestroy(cmd.path);
     if(splits) bstrListDestroy(splits);
-    return rc;
-
+    return -1;
 }
 
 void client_handler(int client_fd)

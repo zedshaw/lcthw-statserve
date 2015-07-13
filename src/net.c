@@ -200,3 +200,9 @@ bstring read_line(RingBuffer *input, const char line_ending)
 error:
     return NULL;
 }
+
+
+void send_reply(RingBuffer *send_rb, bstring reply)
+{
+    RingBuffer_puts(send_rb, reply);
+}

@@ -52,6 +52,45 @@ error:
     return 0;
 }
 
+int fake_command(Command *cmd, RingBuffer *send_rb, bstring path)
+{
+    check(cmd != NULL, "Bad cmd.");
+    check(cmd->path != NULL, "Bad path.");
+    check(send_rb != NULL, "Bad send_rb.");
+    check(path != NULL, "Bad path given.");
+
+    return 0;
+error:
+    return -1;
+}
+
+char *test_path_parsing()
+{
+    struct bstrList *result = NULL;
+    struct tagbstring slash = bsStatic("/");
+    struct tagbstring logins_zed = bsStatic("/logins/zed");
+    struct tagbstring command_name = bsStatic("dump");
+    RingBuffer *send_rb = RingBuffer_create(1024);
+    struct bstrList *path = bsplits(&logins_zed, &slash);
+    int rc = 0;
+
+    Command fake = {
+        .command = &command_name,
+        .name = &logins_zed,
+        .number = NULL,
+        .handler = fake_command,
+        .path = path
+    };
+
+    result = parse_name(&logins_zed);
+    mu_assert(result != NULL, "Failed to parse /logins/zed");
+
+    rc = scan_paths(&fake, send_rb); 
+    mu_assert(rc != -1, "scan_paths failed.");
+
+    return NULL;
+}
+
 char *test_create()
 {
     LineTest tests[] = {
@@ -87,6 +126,7 @@ char *all_tests()
 
     mu_run_test(test_create);
     mu_run_test(test_sample);
+    mu_run_test(test_path_parsing);
 
     return NULL;
 }
