@@ -206,3 +206,4 @@ void send_reply(RingBuffer *send_rb, bstring reply)
 {
     RingBuffer_puts(send_rb, reply);
 }
+

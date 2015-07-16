@@ -28,6 +28,8 @@ $(TARGET): build $(OBJECTS)
 $(SO_TARGET): $(TARGET) $(OBJECTS)
 	$(CC) -shared -o $@ $(LDFLAGS) $(LIBS) $(OBJECTS)
 
+$(TESTS): $(TARGET) $(SO_TARGET)
+
 build:
 	@mkdir -p build
 	@mkdir -p bin

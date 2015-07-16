@@ -21,7 +21,6 @@ int attempt_line(LineTest test)
 
     rc = parse_line(line, send_rb);
     check(rc == 0, "Failed to parse line.");
-
     result = RingBuffer_get_all(send_rb);
     check(result != NULL, "Ring buffer empty.");
     check(biseq(result, test.result), "Got the wrong output: %s expected %s",
@@ -117,16 +116,79 @@ char *test_sample()
     return NULL;
 }
 
+char *test_store_load()
+{
+    LineTest tests[] = {
+        {.line = "delete /zed", .result = &OK, .description = "delete zed failed"},
+        {.line = "create /zed 100", .result = &OK, .description = "create zed failed"},
+        {.line = "store /zed", .result = &OK, .description = "store zed failed"},
+        {.line = "load /zed /sam", .result = &OK, .description = "load zed failed"},
+        {.line = "delete /sam", .result = &OK, .description = "load zed failed"},
+    };
+
+    mu_assert(run_test_lines(tests, 3), "Failed to run sample tests.");
+
+    return NULL;
+}
+
+char *test_encrypt_armor_name()
+{
+    struct tagbstring test1 = bsStatic("/logins");
+    struct tagbstring expect1 = bsStatic("vtmTmzNI");
+    struct tagbstring test2 = bsStatic("../../../../../../../../etc/passwd");
+    struct tagbstring expect2 = bsStatic("pVOBpFjHEIhB7cuT3BGUvyZGn3lvyj226mgggggg");
+   
+    bstring result = encrypt_armor_name(&test1);
+    debug("Got encrypted name %s", bdata(result));
+    mu_assert(biseq(result, &expect1), "Failed to encrypt test2.");
+    bdestroy(result);
+
+    result = encrypt_armor_name(&test2);
+    debug("Got encrypted name %s", bdata(result));
+    mu_assert(biseq(result, &expect2), "Failed to encrypt test2.");
+    bdestroy(result);
+
+    return NULL;
+}
+
+char *test_path_sanitize_armor()
+{
+    struct tagbstring base = bsStatic("/tmp");
+    struct tagbstring test1 = bsStatic("/somepath/here/there");
+    bstring encname = encrypt_armor_name(&test1);
+    bstring expect = bformat("%s/%s", bdata(&base), bdata(encname));
+    struct tagbstring test2 = bsStatic("../../../../../../../../etc/passwd");
+
+
+    bstring result = sanitize_location(&base, &test1);
+    mu_assert(result != NULL, "Failed to sanitize path.");
+    mu_assert(biseq(result, expect), "failed to sanitize test1");
+
+    // this should be pulled up into a tester function
+    // BUG: just get rid of this and use md5
+    encname = encrypt_armor_name(&test2);
+    expect = bformat("%s/%s", bdata(&base), bdata(encname));
+    result = sanitize_location(&base, &test2);
+    mu_assert(result != NULL, "Failed to sanitize path.");
+    mu_assert(biseq(result, expect), "failed to sanitize test1");
+    
+
+    return NULL;
+}
+
 char *all_tests()
 {
     mu_suite_start();
 
-    int rc = setup_data_store();
+    int rc = setup_data_store("/tmp");
     mu_assert(rc == 0, "Failed to setup the data store.");
 
+    mu_run_test(test_path_parsing);
+    mu_run_test(test_encrypt_armor_name);
+    mu_run_test(test_path_sanitize_armor);
     mu_run_test(test_create);
     mu_run_test(test_sample);
-    mu_run_test(test_path_parsing);
+    mu_run_test(test_store_load);
 
     return NULL;
 }

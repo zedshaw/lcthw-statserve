@@ -14,6 +14,7 @@ typedef struct Command {
     bstring name;
     struct bstrList *path;
     bstring number;
+    bstring arg;
     handler_cb handler;
 } Command;
 
@@ -25,7 +26,7 @@ typedef struct Record {
 
 struct tagbstring OK;
 
-int setup_data_store();
+int setup_data_store(const char *store_path);
 
 struct bstrList *parse_name(bstring name);
 
@@ -33,6 +34,10 @@ int scan_paths(Command *cmd, RingBuffer *send_rb);
 
 int parse_line(bstring data, RingBuffer *send_rb);
 
-int echo_server(const char *host, const char *port);
+int run_server(const char *host, const char *port, const char *store_path);
+
+bstring sanitize_location(bstring base, bstring path);
+
+bstring encrypt_armor_name(bstring name);
 
 #endif
